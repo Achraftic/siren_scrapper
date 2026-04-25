@@ -1,13 +1,12 @@
-from pathlib import Path
+from config import INPUT_PARQUET_PATH, SIRET_BATCHES_DIR, BATCH_FILE_PREFIX
 import logging
-
+from pathlib import Path
 import polars as pl
 
-
-INPUT_PARQUET = Path("./DATA/prospecting_leads_2026.parquet")
-OUTPUT_DIR = Path("./DATA/siret_batches")
+INPUT_PARQUET = INPUT_PARQUET_PATH
+OUTPUT_DIR = SIRET_BATCHES_DIR
 BATCH_SIZE = 100000
-FILE_PREFIX = "siret_batch"
+FILE_PREFIX = BATCH_FILE_PREFIX
 
 
 logging.basicConfig(

@@ -3,19 +3,19 @@ name: Scrape Entreprises API
 on:
   schedule:
     - cron: '0 */2 * * *' # Automatically run every 2 hours
-  workflow_dispatch: # Allow manual triggering from the Actions tab
+  workflow_dispatch: # Allow manual triggering
 
 jobs:
   scrape_and_push:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Required to push changes back to the repo
+      contents: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
         with:
-          fetch-depth: 0 # Fetch all history for proper pushing
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -30,17 +30,13 @@ jobs:
 
       - name: Run Scraper
         run: python process_all_batches.py
-        env:
-          # Limit the number of batches per run to avoid GitHub's 6-hour timeout
-          MAX_BATCHES_PER_RUN: 1 
-          MAX_WORKERS: 4
 
       - name: Commit and Push Results
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Check if there are new parquet files
+          # Add results from the data_api directory
           git add data_api/*.parquet
           
           if git diff --staged --quiet; then
@@ -49,4 +45,4 @@ jobs:
             git commit -m "chore: update api results $(date +'%Y-%m-%d %H:%M')"
             git push origin main
           fi
-        continue-on-error: true # Prevent failure if push fails due to race conditions
+        continue-on-error: true

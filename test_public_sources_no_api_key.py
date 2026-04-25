@@ -1,5 +1,4 @@
-from __future__ import annotations
-
+from config import SIRET_BATCHES_DIR, DATA_DIR, USER_AGENT
 import json
 import logging
 import time
@@ -11,12 +10,14 @@ import pandas as pd
 import requests
 
 
-BATCH_FILE = Path("./DATA/siret_batches/siret_batch_00001.txt")
-OUTPUT_DIR = Path("./DATA/public_endpoint_tests")
+# Try to find a batch file
+batch_files = sorted(list(SIRET_BATCHES_DIR.glob("siret_batch_*.txt")))
+BATCH_FILE = batch_files[0] if batch_files else DATA_DIR / "siret_batches/siret_batch_00001.txt"
+OUTPUT_DIR = DATA_DIR / "public_endpoint_tests"
 MAX_SIRET_TO_TEST = 25
 TIMEOUT_SECONDS = 12
 SLEEP_BETWEEN_REQUESTS = 0.4
-USER_AGENT = "public-endpoint-tester/1.0 (+no-auth-check)"
+# USER_AGENT is imported from config
 
 
 logging.basicConfig(

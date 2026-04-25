@@ -1,8 +1,12 @@
 name: Scrape Entreprises API
 
+concurrency:
+  group: scraping-pipeline
+  cancel-in-progress: false
+
 on:
   schedule:
-    - cron: '0 */2 * * *' # Automatically run every 2 hours
+    - cron: '0 */5 * * *' # Automatically run every 5 hours
   workflow_dispatch: # Allow manual triggering
 
 jobs:
@@ -36,13 +40,13 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Add results from the data_api directory
-          git add data_api/*.parquet
+          # Add all changes (including deletions of checkpoints) from the data_api directory
+          git add -A data_api/
           
           if git diff --staged --quiet; then
-            echo "No new data found. Skipping commit."
+            echo "No changes to commit."
           else
-            git commit -m "chore: update api results $(date +'%Y-%m-%d %H:%M')"
+            git commit -m "chore: update api results and checkpoints $(date +'%Y-%m-%d %H:%M')"
             git push origin main
           fi
         continue-on-error: true

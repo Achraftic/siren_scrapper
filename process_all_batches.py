@@ -15,12 +15,16 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_API_DIR = os.path.join(BASE_DIR, "data_api")
 SIRET_BATCHES_DIR = os.path.join(DATA_API_DIR, "siret_batches")
 
-MAX_WORKERS = 4
-MAX_BATCHES_PER_RUN = 1  # Conservative for GitHub Actions
-CHUNK_SIZE = 500
-REQUEST_DELAY = 0.4
+MAX_WORKERS = 5
+MAX_BATCHES_PER_RUN = 5  # Increased, but limited by MAX_RUN_DURATION
+CHUNK_SIZE = 200        # Smaller chunks for more frequent checkpoints
+REQUEST_DELAY = 0.75    # Conservative delay to stay under 7 req/s (5 * 1/0.75 = 6.6 req/s)
 API_URL = "https://recherche-entreprises.api.gouv.fr/search"
 USER_AGENT = "Mozilla/5.0 (DataMiningProject; contact@example.com)"
+
+# Execution Time Limit (5.5 hours to allow Git push)
+MAX_RUN_DURATION = 5.5 * 3600 
+START_TIME = time.time()
 
 # Ensure directory exists
 os.makedirs(DATA_API_DIR, exist_ok=True)
@@ -151,6 +155,18 @@ def process_batch(batch_file, output_parquet, session):
         speed = processed / (elapsed + 0.001)
         logger.info(f"[{processed}/{total_sirets}] Speed: {speed:.2f} req/s")
 
+        # Check for global timeout
+        if time.time() - START_TIME > MAX_RUN_DURATION:
+            logger.warning("Approaching execution time limit. Saving partial results...")
+            if all_results:
+                df = pd.DataFrame(all_results)
+                for col in df.columns:
+                    if df[col].apply(lambda x: isinstance(x, (dict, list))).any():
+                        df[col] = df[col].apply(lambda x: json.dumps(x) if isinstance(x, (dict, list)) else x)
+                df.to_parquet(output_parquet, index=False)
+                logger.info(f"Saved partial results ({len(df)}) to {output_parquet}")
+            return "TIMEOUT"
+
     if all_results:
         df = pd.DataFrame(all_results)
         for col in df.columns:
@@ -178,13 +194,18 @@ def main():
 
         batch_name = os.path.basename(batch_file).replace(".txt", ".parquet")
         output_path = os.path.join(DATA_API_DIR, batch_name)
+        checkpoint_path = output_path + ".checkpoint"
 
-        if os.path.exists(output_path):
-            logger.info(f"Skipping {batch_name}")
+        # Check if batch is already fully completed
+        if os.path.exists(output_path) and not os.path.exists(checkpoint_path):
+            logger.info(f"Skipping {batch_name} (already finished)")
             continue
 
         try:
-            process_batch(batch_file, output_path, session)
+            status = process_batch(batch_file, output_path, session)
+            if status == "TIMEOUT":
+                logger.info("Stopping run due to timeout.")
+                break
             batches_processed += 1
         except Exception as e:
             logger.error(f"Error in batch {batch_name}: {e}")

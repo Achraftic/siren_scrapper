@@ -110,15 +110,23 @@ def process_batch(batch_file, output_parquet, session):
     all_results = []
     start_index = 0
 
-    if os.path.exists(checkpoint_path):
+    # Resume logic: Load data from Parquet and index from tiny checkpoint
+    if os.path.exists(output_parquet) and os.path.exists(checkpoint_path):
         try:
+            # Load existing results from Parquet (compressed)
+            df_existing = pd.read_parquet(output_parquet)
+            all_results = df_existing.to_dict("records")
+            
+            # Load last index from tiny JSON
             with open(checkpoint_path, "r", encoding="utf-8") as f:
                 checkpoint_data = json.load(f)
-                all_results = checkpoint_data.get("results", [])
                 start_index = checkpoint_data.get("last_index", 0)
-                logger.info(f"Resuming at index {start_index}...")
+                
+            logger.info(f"Resuming at index {start_index} with {len(all_results)} existing results...")
         except Exception as e:
-            logger.warning(f"Could not load checkpoint: {e}")
+            logger.warning(f"Could not load resume state: {e}. Starting fresh.")
+            all_results = []
+            start_index = 0
 
     with open(batch_file, "r", encoding="utf-8") as f:
         sirets = [line.strip() for line in f.readlines()]
@@ -144,11 +152,22 @@ def process_batch(batch_file, output_parquet, session):
             results = list(executor.map(worker, chunk))
             all_results.extend(results)
 
+        # Save PROGRESS: Tiny JSON for metadata + Parquet for data
         try:
+            # Save metadata
             with open(checkpoint_path, "w", encoding="utf-8") as f:
-                json.dump({"last_index": i + len(chunk), "results": all_results}, f)
+                json.dump({"last_index": i + len(chunk)}, f)
+            
+            # Save data to Parquet (much smaller than JSON)
+            df = pd.DataFrame(all_results)
+            # Ensure complex types are handled
+            for col in df.columns:
+                if df[col].apply(lambda x: isinstance(x, (dict, list))).any():
+                    df[col] = df[col].apply(lambda x: json.dumps(x) if isinstance(x, (dict, list)) else x)
+            df.to_parquet(output_parquet, index=False)
+            
         except Exception as e:
-            logger.error(f"Failed checkpoint: {e}")
+            logger.error(f"Failed checkpoint/save: {e}")
 
         elapsed = time.time() - start_time
         processed = i + len(chunk)
@@ -157,26 +176,13 @@ def process_batch(batch_file, output_parquet, session):
 
         # Check for global timeout
         if time.time() - START_TIME > MAX_RUN_DURATION:
-            logger.warning("Approaching execution time limit. Saving partial results...")
-            if all_results:
-                df = pd.DataFrame(all_results)
-                for col in df.columns:
-                    if df[col].apply(lambda x: isinstance(x, (dict, list))).any():
-                        df[col] = df[col].apply(lambda x: json.dumps(x) if isinstance(x, (dict, list)) else x)
-                df.to_parquet(output_parquet, index=False)
-                logger.info(f"Saved partial results ({len(df)}) to {output_parquet}")
+            logger.warning("Approaching execution time limit. Results already saved.")
             return "TIMEOUT"
 
-    if all_results:
-        df = pd.DataFrame(all_results)
-        for col in df.columns:
-            if df[col].apply(lambda x: isinstance(x, (dict, list))).any():
-                df[col] = df[col].apply(lambda x: json.dumps(x) if isinstance(x, (dict, list)) else x)
-
-        df.to_parquet(output_parquet, index=False)
-        logger.info(f"Saved {len(df)} results to {output_parquet}")
-        if os.path.exists(checkpoint_path):
-            os.remove(checkpoint_path)
+    # Final cleanup: remove tiny checkpoint if finished
+    logger.info(f"Finished batch {batch_base}. Saved {len(all_results)} results.")
+    if os.path.exists(checkpoint_path):
+        os.remove(checkpoint_path)
 
 def main():
     batch_files = sorted(glob(os.path.join(SIRET_BATCHES_DIR, "siret_batch_*.txt")))

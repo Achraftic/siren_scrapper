@@ -6,8 +6,8 @@ concurrency:
 
 on:
   schedule:
-    - cron: '0 */5 * * *' # Automatically run every 5 hours
-  workflow_dispatch: # Allow manual triggering
+    - cron: '0 */5 * * *'
+  workflow_dispatch:
 
 jobs:
   scrape_and_push:
@@ -17,12 +17,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.9'
           cache: 'pip'
@@ -40,13 +40,12 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Add all changes (including deletions of checkpoints) from the data_api directory
           git add -A data_api/
           
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
             git commit -m "chore: update api results and checkpoints $(date +'%Y-%m-%d %H:%M')"
+            git pull --rebase origin main
             git push origin main
           fi
-        continue-on-error: true

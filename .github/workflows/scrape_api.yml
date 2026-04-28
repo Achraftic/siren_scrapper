@@ -44,8 +44,47 @@ jobs:
           
           if git diff --staged --quiet; then
             echo "No changes to commit."
-          else
-            git commit -m "chore: update api results and checkpoints $(date +'%Y-%m-%d %H:%M')"
-            git pull --rebase origin main
-            git push origin main
+            exit 0
+          fi
+          
+          git commit -m "chore: update api results and checkpoints $(date +'%Y-%m-%d %H:%M')"
+          
+          MAX_RETRIES=5
+          RETRY_COUNT=0
+          SUCCESS=false
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            git fetch origin main
+            
+            # Rebase onto the latest main, favoring our local commit's changes (-X theirs)
+            if git rebase origin/main -X theirs; then
+              if git push origin main; then
+                SUCCESS=true
+                break
+              fi
+            else
+              echo "Rebase conflict detected. Resolving in favor of local changes..."
+              
+              # Resolve binary or add/add conflicts by keeping our local version ('theirs' in rebase)
+              git checkout --theirs data_api/ || true
+              git add data_api/ || true
+              
+              # Continue the rebase
+              GIT_EDITOR=true git rebase --continue || git rebase --abort
+              
+              # Try to push the resolved changes
+              if git push origin main; then
+                SUCCESS=true
+                break
+              fi
+            fi
+            
+            echo "Push failed or rebase aborted, retrying in 10 seconds..."
+            sleep 10
+            RETRY_COUNT=$((RETRY_COUNT+1))
+          done
+          
+          if [ "$SUCCESS" = false ]; then
+            echo "Failed to push after $MAX_RETRIES attempts."
+            exit 1
           fi

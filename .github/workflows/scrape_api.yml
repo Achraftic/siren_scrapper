@@ -1,7 +1,7 @@
 name: Scrape Entreprises API
 
 concurrency:
-  group: scraping-pipeline
+  group: scraping-pipeline-${{ github.ref }}
   cancel-in-progress: false
 
 on:
@@ -34,6 +34,16 @@ jobs:
 
       - name: Run Scraper
         run: python process_all_batches.py
+
+      - name: Upload State Snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraping-state-${{ github.run_id }}
+          path: |
+            data_api/processed_index/
+            data_api/*.checkpoint
+          if-no-files-found: ignore
 
       - name: Commit and Push Results
         run: |

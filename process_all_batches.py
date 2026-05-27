@@ -15,7 +15,7 @@ from urllib3.util.retry import Retry
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_API_DIR = os.path.join(BASE_DIR, "data_api")
 SIRET_BATCHES_DIR = os.path.join(DATA_API_DIR, "siret_batches")
-
+HUGGINGFACE_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN") or "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"
 MAX_WORKERS = 5
 MAX_BATCHES_PER_RUN = 5  # Increased, but limited by MAX_RUN_DURATION
 CHUNK_SIZE = 200  # Smaller chunks for more frequent checkpoints
@@ -41,6 +41,55 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(threadName)s | %(message)s",
 )
 logger = logging.getLogger("batch_processor")
+
+
+def download_state():
+    """
+    Download the current scraper state from Hugging Face dataset.
+    """
+    token = HUGGINGFACE_TOKEN
+    if not token:
+        logger.info("No Hugging Face token provided. Skipping state download.")
+        return
+    logger.info("Syncing state down from Hugging Face (axrafTic/siren_dataset)...")
+    try:
+        from huggingface_hub import snapshot_download
+        snapshot_download(
+            repo_id="axrafTic/siren_dataset",
+            repo_type="dataset",
+            local_dir=DATA_API_DIR,
+            token=token,
+            ignore_patterns=["siret_batches/**", ".git/**", ".cache/**"]
+        )
+        logger.info("State sync down completed successfully.")
+    except Exception as e:
+        logger.error(f"Failed to sync state down from Hugging Face: {e}")
+
+
+def upload_state():
+    """
+    Upload the current local scraper state to Hugging Face dataset.
+    """
+    token = HUGGINGFACE_TOKEN
+    if not token:
+        logger.info("No Hugging Face token provided. Skipping state upload.")
+        return
+    logger.info("Syncing state up to Hugging Face (axrafTic/siren_dataset)...")
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        api.upload_folder(
+            folder_path=DATA_API_DIR,
+            repo_id="axrafTic/siren_dataset",
+            repo_type="dataset",
+            token=token,
+            ignore_patterns=["siret_batches/**", ".git/**", ".cache/**"],
+            commit_message="Update scraper results and checkpoints"
+        )
+        logger.info("State sync up completed successfully.")
+    except Exception as e:
+        logger.error(f"Failed to sync state up to Hugging Face: {e}")
+
 
 # Global state for rate limiting across threads
 cooldown_until = 0
@@ -387,43 +436,48 @@ def process_batch(batch_file, output_parquet, session, processed_store):
 
 
 def main():
-    batch_files = sorted(glob(os.path.join(SIRET_BATCHES_DIR, "siret_batch_*.txt")))
+    download_state()
 
-    if not batch_files:
-        logger.error(f"No batches found in {SIRET_BATCHES_DIR}")
-        return
+    try:
+        batch_files = sorted(glob(os.path.join(SIRET_BATCHES_DIR, "siret_batch_*.txt")))
 
-    session = setup_session()
-    processed_store = ProcessedIdentifierStore(PROCESSED_INDEX_DIR)
-    batches_processed = 0
+        if not batch_files:
+            logger.error(f"No batches found in {SIRET_BATCHES_DIR}")
+            return
 
-    for batch_file in batch_files:
-        if batches_processed >= MAX_BATCHES_PER_RUN:
-            break
+        session = setup_session()
+        processed_store = ProcessedIdentifierStore(PROCESSED_INDEX_DIR)
+        batches_processed = 0
 
-        batch_name = os.path.basename(batch_file).replace(".txt", ".parquet")
-        output_path = os.path.join(DATA_API_DIR, batch_name)
-        checkpoint_path = output_path + ".checkpoint"
-
-        # Check if batch is already fully completed
-        if os.path.exists(output_path) and not os.path.exists(checkpoint_path):
-            logger.info(f"Skipping {batch_name} (already finished)")
-            continue
-
-        try:
-            status = process_batch(batch_file, output_path, session, processed_store)
-            if status == "TIMEOUT":
-                logger.info("Stopping run due to timeout.")
+        for batch_file in batch_files:
+            if batches_processed >= MAX_BATCHES_PER_RUN:
                 break
-            batches_processed += 1
-        except Exception as e:
-            logger.error(f"Error in batch {batch_name}: {e}")
 
-    processed_store.flush()
-    logger.info(
-        "Run completed. Loaded completed identifiers in memory: %s",
-        processed_store.total_loaded_completed(),
-    )
+            batch_name = os.path.basename(batch_file).replace(".txt", ".parquet")
+            output_path = os.path.join(DATA_API_DIR, batch_name)
+            checkpoint_path = output_path + ".checkpoint"
+
+            # Check if batch is already fully completed
+            if os.path.exists(output_path) and not os.path.exists(checkpoint_path):
+                logger.info(f"Skipping {batch_name} (already finished)")
+                continue
+
+            try:
+                status = process_batch(batch_file, output_path, session, processed_store)
+                if status == "TIMEOUT":
+                    logger.info("Stopping run due to timeout.")
+                    break
+                batches_processed += 1
+            except Exception as e:
+                logger.error(f"Error in batch {batch_name}: {e}")
+
+        processed_store.flush()
+        logger.info(
+            "Run completed. Loaded completed identifiers in memory: %s",
+            processed_store.total_loaded_completed(),
+        )
+    finally:
+        upload_state()
 
 
 if __name__ == "__main__":

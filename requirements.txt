@@ -2,3 +2,4 @@ pandas
 requests
 polars
 pyarrow
+huggingface_hub

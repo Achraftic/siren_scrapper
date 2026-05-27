@@ -4,3 +4,6 @@ __pycache__/
 *.checkpoint
 .env
 *.log
+data_api/*.parquet
+data_api/*.parquet.checkpoint
+data_api/processed_index/

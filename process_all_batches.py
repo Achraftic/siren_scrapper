@@ -436,10 +436,12 @@ def process_batch(batch_file, output_parquet, session, processed_store):
 
 
 def main():
-    download_state()
+    # download_state()
 
     try:
         batch_files = sorted(glob(os.path.join(SIRET_BATCHES_DIR, "siret_batch_*.txt")))
+        # Start tracking from batch 33 onwards
+        batch_files = [f for f in batch_files if int(os.path.basename(f).replace('siret_batch_', '').replace('.txt', '')) >= 33]
 
         if not batch_files:
             logger.error(f"No batches found in {SIRET_BATCHES_DIR}")

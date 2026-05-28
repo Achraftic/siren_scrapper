@@ -1,12 +1,15 @@
+import csv
 from pathlib import Path
 import logging
+from typing import Callable
 
 import polars as pl
 
 
-DATA_DIR = Path("./DATA")
+DATA_DIR = Path(__file__).resolve().parent / "DATA"
 ENTREPRISES_IMMATRICULEES_PATH = DATA_DIR / "entreprises-immatriculees-en-2025.csv"
 ENTREPRISES_RGE_PATH = DATA_DIR / "liste-des-entreprises-rge-2.csv"
+SHOP_CRAFT_OFFICE_PATH = DATA_DIR / "shop_craft_office_csv" / "data.csv"
 NAF_PATH = DATA_DIR / "nomenclature-dactivites-francaise-naf-rev-2-code-ape.csv"
 BASE_CODES_POSTAUX_PATH = DATA_DIR / "base-officielle-codes-postaux.csv"
 BASE_CODES_POSTAUX_ALT_PATH = DATA_DIR / "base-officielle-des-codes-postaux.csv"
@@ -16,6 +19,7 @@ STOCK_ETABLISSEMENT_PATH = DATA_DIR / "StockEtablissement_utf8.parquet"
 STOCK_UNITE_LEGALE_PATH = DATA_DIR / "StockUniteLegale_utf8.parquet"
 OUTPUT_PATH = DATA_DIR / "complete_dataset.parquet"
 OUTPUT_FORMAT = "parquet"
+SUPPORTED_INPUT_SUFFIXES = {".csv", ".parquet"}
 
 
 logging.basicConfig(
@@ -26,10 +30,16 @@ logger = logging.getLogger("dataset_builder")
 
 
 def detect_separator(path: Path) -> str:
-    with path.open("r", encoding="utf-8", errors="ignore") as handle:
-        first_line = handle.readline()
+    sample = path.read_text(encoding="utf-8", errors="ignore")[:8192]
     candidates = [";", ",", "\t", "|"]
-    return max(candidates, key=first_line.count)
+    try:
+        return csv.Sniffer().sniff(sample, delimiters=candidates).delimiter
+    except csv.Error:
+        first_lines = sample.splitlines()[:5]
+        return max(
+            candidates,
+            key=lambda separator: sum(line.count(separator) for line in first_lines),
+        )
 
 
 def scan_csv(path: Path) -> pl.LazyFrame:
@@ -53,6 +63,16 @@ def validate_paths(paths: list[Path]) -> None:
     missing = [str(path) for path in paths if not path.exists()]
     if missing:
         raise FileNotFoundError(f"Missing input files: {missing}")
+
+
+def discover_data_files(data_dir: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in data_dir.rglob("*")
+        if path.is_file()
+        and path.suffix.lower() in SUPPORTED_INPUT_SUFFIXES
+        and path.resolve() != OUTPUT_PATH.resolve()
+    )
 
 
 def normalize_postal_code(expr: pl.Expr) -> pl.Expr:
@@ -200,6 +220,110 @@ def build_rge_frame(path: Path) -> pl.LazyFrame:
     )
 
 
+def build_generic_siret_frame(path: Path) -> pl.LazyFrame | None:
+    schema_names = scan_table(path).collect_schema().names()
+    if "siret" not in schema_names:
+        return None
+
+    def pick(
+        candidates: list[str],
+        alias: str,
+        normalizer: Callable[[pl.Expr], pl.Expr] | None = None,
+    ) -> pl.Expr:
+        for candidate in candidates:
+            if candidate in schema_names:
+                expr = pl.col(candidate)
+                if normalizer is not None:
+                    expr = normalizer(expr)
+                else:
+                    expr = expr.cast(pl.Utf8)
+                return expr.alias(alias)
+        return pl.lit(None, dtype=pl.Utf8).alias(alias)
+
+    select_columns = [
+        pl.col("siret").cast(pl.Utf8).str.pad_start(14, "0").alias("siret"),
+        pick(
+            [
+                "company_name",
+                "nom_entreprise",
+                "name",
+                "brand",
+                "operator",
+                "raison_sociale",
+                "denomination",
+                "nom",
+            ],
+            "source_company_name",
+        ),
+        pick(["address", "adresse"], "source_address"),
+        pick(
+            [
+                "city",
+                "com_nom",
+                "commune",
+                "libelleCommuneEtablissement",
+                "Ville",
+                "nom_de_la_commune",
+            ],
+            "source_city",
+        ),
+        pick(
+            ["postal_code", "code_postal", "codePostalEtablissement", "Code_postal"],
+            "source_postal_code",
+            normalize_postal_code,
+        ),
+        pick(["website", "site_internet", "url"], "source_website"),
+        pick(["phone", "telephone"], "source_phone"),
+        pick(["email"], "source_email"),
+        pick(
+            [
+                "activitePrincipaleEtablissement",
+                "code_naf",
+                "naf",
+                "Code APE",
+                "Code_APE",
+            ],
+            "source_industry_code",
+            normalize_industry_code,
+        ),
+        pick(
+            ["dateCreationUniteLegale", "date_etablissement", "date_entreprise"],
+            "source_registration_date",
+        ),
+        pl.lit(path.name).alias("source_file"),
+    ]
+
+    return first_non_null_by_siret(scan_table(path).select(select_columns))
+
+
+def build_shop_craft_frame(path: Path) -> pl.LazyFrame:
+    return first_non_null_by_siret(
+        scan_csv(path).select(
+            [
+                pl.col("siret").cast(pl.Utf8).str.pad_start(14, "0").alias("siret"),
+                pl.coalesce(
+                    [
+                        pl.col("name"),
+                        pl.col("brand"),
+                        pl.col("operator"),
+                    ]
+                )
+                .cast(pl.Utf8)
+                .str.strip_chars()
+                .alias("shop_company_name"),
+                pl.col("address").cast(pl.Utf8).alias("shop_address"),
+                pl.col("com_nom").cast(pl.Utf8).alias("shop_city"),
+                pl.col("website").cast(pl.Utf8).alias("shop_website"),
+                pl.col("phone").cast(pl.Utf8).alias("shop_phone"),
+                pl.col("email").cast(pl.Utf8).alias("shop_email"),
+                pl.col("type").cast(pl.Utf8).alias("shop_type"),
+                pl.col("opening_hours").cast(pl.Utf8).alias("shop_opening_hours"),
+                pl.col("last_update").cast(pl.Utf8).alias("shop_last_update"),
+            ]
+        )
+    )
+
+
 def build_prospecting_frame(path: Path) -> pl.LazyFrame:
     return first_non_null_by_siret(
         scan_table(path).select(
@@ -315,6 +439,7 @@ def build_stock_reference(
 def build_complete_dataset(
     entreprises_immatriculees_path: Path,
     entreprises_rge_path: Path,
+    shop_craft_office_path: Path,
     naf_path: Path,
     base_codes_postaux_path: Path,
     base_codes_postaux_alt_path: Path,
@@ -325,6 +450,7 @@ def build_complete_dataset(
 ) -> pl.LazyFrame:
     immatriculees = build_immatriculees_frame(entreprises_immatriculees_path)
     rge = build_rge_frame(entreprises_rge_path)
+    shop_craft = build_shop_craft_frame(shop_craft_office_path)
     naf = build_naf_reference(naf_path)
     prospecting = build_prospecting_frame(prospecting_leads_path)
     stock_reference = build_stock_reference(
@@ -337,13 +463,57 @@ def build_complete_dataset(
         laposte_path,
     )
 
+    discovered_sources = []
+    for path in discover_data_files(DATA_DIR):
+        if path.resolve() in {
+            OUTPUT_PATH.resolve(),
+            entreprises_immatriculees_path.resolve(),
+            entreprises_rge_path.resolve(),
+            shop_craft_office_path.resolve(),
+            naf_path.resolve(),
+            base_codes_postaux_path.resolve(),
+            base_codes_postaux_alt_path.resolve(),
+            laposte_path.resolve(),
+            prospecting_leads_path.resolve(),
+            stock_etablissement_path.resolve(),
+            stock_unite_legale_path.resolve(),
+        }:
+            continue
+        generic_frame = build_generic_siret_frame(path)
+        if generic_frame is not None:
+            discovered_sources.append(generic_frame)
+        else:
+            logger.info("Skipping non-SIRET source: %s", path.name)
+
+    discovered_sources_frame = (
+        pl.concat(discovered_sources, how="vertical")
+        if discovered_sources
+        else pl.DataFrame(
+            schema={
+                "siret": pl.Utf8,
+                "source_company_name": pl.Utf8,
+                "source_address": pl.Utf8,
+                "source_city": pl.Utf8,
+                "source_postal_code": pl.Utf8,
+                "source_website": pl.Utf8,
+                "source_phone": pl.Utf8,
+                "source_email": pl.Utf8,
+                "source_industry_code": pl.Utf8,
+                "source_registration_date": pl.Utf8,
+                "source_file": pl.Utf8,
+            }
+        ).lazy()
+    )
+
     siret_universe = (
         pl.concat(
             [
                 immatriculees.select("siret"),
                 rge.select("siret"),
+                shop_craft.select("siret"),
                 stock_reference.select("siret"),
                 prospecting.select("siret"),
+                *[source.select("siret") for source in discovered_sources],
             ],
             how="vertical",
         )
@@ -354,8 +524,10 @@ def build_complete_dataset(
     return (
         siret_universe.join(immatriculees, on="siret", how="left")
         .join(rge, on="siret", how="left")
+        .join(shop_craft, on="siret", how="left")
         .join(stock_reference, on="siret", how="left")
         .join(prospecting, on="siret", how="left")
+        .join(discovered_sources_frame, on="siret", how="left")
         .with_columns(
             [
                 pl.coalesce(
@@ -363,30 +535,37 @@ def build_complete_dataset(
                         pl.col("industry_code"),
                         pl.col("stock_industry_code"),
                         pl.col("pros_industry_code"),
+                        pl.col("source_industry_code"),
                     ]
                 ).alias("industry_code"),
                 pl.coalesce(
                     [
                         pl.col("company_name"),
                         pl.col("rge_company_name"),
+                        pl.col("shop_company_name"),
                         pl.col("stock_company_name"),
                         pl.col("pros_company_name"),
+                        pl.col("source_company_name"),
                     ]
                 ).alias("company_name"),
                 pl.coalesce(
                     [
                         pl.col("address"),
                         pl.col("rge_address"),
+                        pl.col("shop_address"),
                         pl.col("stock_address"),
                         pl.col("pros_address"),
+                        pl.col("source_address"),
                     ]
                 ).alias("address"),
                 pl.coalesce(
                     [
                         pl.col("city"),
                         pl.col("rge_city"),
+                        pl.col("shop_city"),
                         pl.col("stock_city"),
                         pl.col("pros_city"),
+                        pl.col("source_city"),
                     ]
                 ).alias("city"),
                 pl.coalesce(
@@ -394,6 +573,7 @@ def build_complete_dataset(
                         pl.col("postal_code"),
                         pl.col("stock_postal_code"),
                         pl.col("pros_postal_code"),
+                        pl.col("source_postal_code"),
                     ]
                 ).alias("postal_code"),
                 pl.coalesce(
@@ -408,6 +588,7 @@ def build_complete_dataset(
                         pl.col("registration_date"),
                         pl.col("stock_creation_date"),
                         pl.col("pros_creation_date"),
+                        pl.col("source_registration_date"),
                     ]
                 ).alias("registration_date"),
                 pl.coalesce(
@@ -434,6 +615,19 @@ def build_complete_dataset(
                         pl.col("pros_y_lambert_93"),
                     ]
                 ).alias("y_lambert_93"),
+                pl.coalesce(
+                    [
+                        pl.col("shop_website"),
+                        pl.col("rge_website"),
+                        pl.col("source_website"),
+                    ]
+                ).alias("website"),
+                pl.coalesce(
+                    [pl.col("shop_phone"), pl.col("rge_phone"), pl.col("source_phone")]
+                ).alias("phone"),
+                pl.coalesce(
+                    [pl.col("shop_email"), pl.col("rge_email"), pl.col("source_email")]
+                ).alias("email"),
             ]
         )
         .join(naf, on="industry_code", how="left")
@@ -456,10 +650,14 @@ def build_complete_dataset(
 
 def main() -> None:
     logger.info("Dataset build started")
+    discovered_files = discover_data_files(DATA_DIR)
+    logger.info("Discovered %s CSV/parquet inputs under DATA", len(discovered_files))
+    logger.info("Inputs found: %s", ", ".join(path.name for path in discovered_files))
     validate_paths(
         [
             ENTREPRISES_IMMATRICULEES_PATH,
             ENTREPRISES_RGE_PATH,
+            SHOP_CRAFT_OFFICE_PATH,
             NAF_PATH,
             BASE_CODES_POSTAUX_PATH,
             BASE_CODES_POSTAUX_ALT_PATH,
@@ -474,6 +672,7 @@ def main() -> None:
     dataset = build_complete_dataset(
         entreprises_immatriculees_path=ENTREPRISES_IMMATRICULEES_PATH,
         entreprises_rge_path=ENTREPRISES_RGE_PATH,
+        shop_craft_office_path=SHOP_CRAFT_OFFICE_PATH,
         naf_path=NAF_PATH,
         base_codes_postaux_path=BASE_CODES_POSTAUX_PATH,
         base_codes_postaux_alt_path=BASE_CODES_POSTAUX_ALT_PATH,
@@ -485,11 +684,10 @@ def main() -> None:
     output_path = OUTPUT_PATH
     output_path.parent.mkdir(parents=True, exist_ok=True)
     logger.info("Writing output as %s to %s", OUTPUT_FORMAT, output_path)
-    output_df = dataset.collect(engine="streaming")
     if OUTPUT_FORMAT == "parquet":
-        output_df.write_parquet(output_path)
+        dataset.sink_parquet(output_path)
     else:
-        output_df.write_csv(output_path)
+        dataset.sink_csv(output_path)
 
     output_lf = (
         pl.scan_parquet(output_path)

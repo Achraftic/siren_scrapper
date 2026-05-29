@@ -15,7 +15,7 @@ from urllib3.util.retry import Retry
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_API_DIR = os.path.join(BASE_DIR, "data_api")
 SIRET_BATCHES_DIR = os.path.join(DATA_API_DIR, "siret_batches")
-HUGGINGFACE_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN") or "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"
+HUGGINGFACE_TOKEN ="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"
 MAX_WORKERS = 5
 MAX_BATCHES_PER_RUN = 5  # Increased, but limited by MAX_RUN_DURATION
 CHUNK_SIZE = 200  # Smaller chunks for more frequent checkpoints

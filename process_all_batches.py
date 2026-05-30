@@ -15,13 +15,12 @@ from urllib3.util.retry import Retry
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_API_DIR = os.path.join(BASE_DIR, "data_api")
 SIRET_BATCHES_DIR = os.path.join(DATA_API_DIR, "siret_batches")
-HUGGINGFACE_TOKEN = "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"
+# Load token from environment variables (Required for GitHub Actions Secrets)
+HUGGINGFACE_TOKEN = os.environ.get("HUGGINGFACE_TOKEN")
 MAX_WORKERS = 5
 MAX_BATCHES_PER_RUN = 5  # Increased, but limited by MAX_RUN_DURATION
 CHUNK_SIZE = 200  # Smaller chunks for more frequent checkpoints
-REQUEST_DELAY = (
-    0.75  # Conservative delay to stay under 7 req/s (5 * 1/0.75 = 6.6 req/s)
-)
+REQUEST_DELAY = 0.75  # Conservative delay to stay under 7 req/s (5 * 1/0.75 = 6.6 req/s)
 API_URL = "https://recherche-entreprises.api.gouv.fr/search"
 USER_AGENT = "Mozilla/5.0 (DataMiningProject; contact@example.com)"
 PROCESSED_INDEX_DIR = os.path.join(DATA_API_DIR, "processed_index")
@@ -79,14 +78,12 @@ def upload_state():
     try:
         from huggingface_hub import HfApi
 
-        api = HfApi()
+        api = HfApi(token=token)
         api.upload_large_folder(
             folder_path=DATA_API_DIR,
             repo_id="axrafTic/siren_dataset",
             repo_type="dataset",
-            token=token,
             ignore_patterns=["siret_batches/**", ".git/**", ".cache/**"],
-            commit_message="Update scraper results and checkpoints",
         )
         logger.info("State sync up completed successfully.")
     except Exception as e:
@@ -246,12 +243,8 @@ def fetch_siret_data(session, siret):
 
             elif response.status_code == 429:
                 retry_after = response.headers.get("Retry-After")
-                wait_time = (
-                    int(retry_after) if retry_after and retry_after.isdigit() else 20
-                )
-                logger.warning(
-                    f"Rate limited for SIRET {siret}. Global cooldown for {wait_time}s"
-                )
+                wait_time = int(retry_after) if retry_after and retry_after.isdigit() else 20
+                logger.warning(f"Rate limited for SIRET {siret}. Global cooldown for {wait_time}s")
                 with cooldown_lock:
                     cooldown_until = time.time() + wait_time
                 continue
@@ -311,9 +304,7 @@ def process_batch(batch_file, output_parquet, session, processed_store):
                 checkpoint_data = json.load(f)
                 start_index = checkpoint_data.get("last_index", 0)
 
-            logger.info(
-                f"Resuming at index {start_index} with {len(all_results)} existing results..."
-            )
+            logger.info(f"Resuming at index {start_index} with {len(all_results)} existing results...")
         except Exception as e:
             logger.warning(f"Could not load resume state: {e}. Starting fresh.")
             all_results = []
@@ -366,9 +357,7 @@ def process_batch(batch_file, output_parquet, session, processed_store):
     for i in range(start_index, total_identifiers, CHUNK_SIZE):
         chunk = identifiers[i : i + CHUNK_SIZE]
 
-        claimable = [
-            identifier for identifier in chunk if processed_store.claim(identifier)
-        ]
+        claimable = [identifier for identifier in chunk if processed_store.claim(identifier)]
 
         results = []
         if claimable:
@@ -376,9 +365,7 @@ def process_batch(batch_file, output_parquet, session, processed_store):
                 results = list(executor.map(worker, claimable))
 
         for result in results:
-            identifier = str(
-                result.get(DEDUP_KEY_COLUMN) or result.get("queried_siret") or ""
-            ).strip()
+            identifier = str(result.get(DEDUP_KEY_COLUMN) or result.get("queried_siret") or "").strip()
             if not identifier:
                 continue
 
@@ -409,11 +396,7 @@ def process_batch(batch_file, output_parquet, session, processed_store):
                 # Ensure complex types are handled
                 for col in df.columns:
                     if df[col].apply(lambda x: isinstance(x, (dict, list))).any():
-                        df[col] = df[col].apply(
-                            lambda x: (
-                                json.dumps(x) if isinstance(x, (dict, list)) else x
-                            )
-                        )
+                        df[col] = df[col].apply(lambda x: json.dumps(x) if isinstance(x, (dict, list)) else x)
                 df.to_parquet(output_parquet, index=False)
                 processed_store.flush()
 
@@ -436,10 +419,7 @@ def process_batch(batch_file, output_parquet, session, processed_store):
         elapsed = time.time() - start_time
         processed = i + len(chunk)
         speed = processed / (elapsed + 0.001)
-        logger.info(
-            f"[{processed}/{total_identifiers}] Speed: {speed:.2f} req/s | "
-            f"submitted={len(claimable)}"
-        )
+        logger.info(f"[{processed}/{total_identifiers}] Speed: {speed:.2f} req/s | submitted={len(claimable)}")
 
         # Check for global timeout
         if time.time() - START_TIME > MAX_RUN_DURATION:
@@ -460,10 +440,7 @@ def main():
         batch_files = sorted(glob(os.path.join(SIRET_BATCHES_DIR, "siret_batch_*.txt")))
         # Start tracking from batch 33 onwards
         batch_files = [
-            f
-            for f in batch_files
-            if int(os.path.basename(f).replace("siret_batch_", "").replace(".txt", ""))
-            >= 33
+            f for f in batch_files if int(os.path.basename(f).replace("siret_batch_", "").replace(".txt", "")) >= 33
         ]
 
         if not batch_files:
@@ -488,9 +465,7 @@ def main():
                 continue
 
             try:
-                status = process_batch(
-                    batch_file, output_path, session, processed_store
-                )
+                status = process_batch(batch_file, output_path, session, processed_store)
                 if status == "TIMEOUT":
                     logger.info("Stopping run due to timeout.")
                     break

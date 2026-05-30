@@ -15,7 +15,7 @@ from urllib3.util.retry import Retry
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_API_DIR = os.path.join(BASE_DIR, "data_api")
 SIRET_BATCHES_DIR = os.path.join(DATA_API_DIR, "siret_batches")
-HUGGINGFACE_TOKEN ="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"
+HUGGINGFACE_TOKEN = "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"
 MAX_WORKERS = 5
 MAX_BATCHES_PER_RUN = 5  # Increased, but limited by MAX_RUN_DURATION
 CHUNK_SIZE = 200  # Smaller chunks for more frequent checkpoints
@@ -54,12 +54,13 @@ def download_state():
     logger.info("Syncing state down from Hugging Face (axrafTic/siren_dataset)...")
     try:
         from huggingface_hub import snapshot_download
+
         snapshot_download(
             repo_id="axrafTic/siren_dataset",
             repo_type="dataset",
             local_dir=DATA_API_DIR,
             token=token,
-            ignore_patterns=["siret_batches/**", ".git/**", ".cache/**"]
+            ignore_patterns=["siret_batches/**", ".git/**", ".cache/**"],
         )
         logger.info("State sync down completed successfully.")
     except Exception as e:
@@ -77,14 +78,15 @@ def upload_state():
     logger.info("Syncing state up to Hugging Face (axrafTic/siren_dataset)...")
     try:
         from huggingface_hub import HfApi
+
         api = HfApi()
-        api.upload_folder(
+        api.upload_large_folder(
             folder_path=DATA_API_DIR,
             repo_id="axrafTic/siren_dataset",
             repo_type="dataset",
             token=token,
             ignore_patterns=["siret_batches/**", ".git/**", ".cache/**"],
-            commit_message="Update scraper results and checkpoints"
+            commit_message="Update scraper results and checkpoints",
         )
         logger.info("State sync up completed successfully.")
     except Exception as e:
@@ -386,34 +388,48 @@ def process_batch(batch_file, output_parquet, session, processed_store):
                 # Keep failed identifiers eligible for retry in subsequent chunks/runs.
                 processed_store.release_claim(identifier)
 
-        all_results.extend(results)
-        all_results = dedup_results(all_results)
+        if results:
+            all_results.extend(results)
+            all_results = dedup_results(all_results)
 
-        # Save PROGRESS: Tiny JSON for metadata + Parquet for data
-        try:
-            # Save metadata
-            with open(checkpoint_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "last_index": i + len(chunk),
-                        "processed_in_batch": len(all_results),
-                    },
-                    f,
-                )
-
-            # Save data to Parquet (much smaller than JSON)
-            df = pd.DataFrame(all_results)
-            # Ensure complex types are handled
-            for col in df.columns:
-                if df[col].apply(lambda x: isinstance(x, (dict, list))).any():
-                    df[col] = df[col].apply(
-                        lambda x: json.dumps(x) if isinstance(x, (dict, list)) else x
+            # Save PROGRESS: Tiny JSON for metadata + Parquet for data
+            try:
+                # Save metadata
+                with open(checkpoint_path, "w", encoding="utf-8") as f:
+                    json.dump(
+                        {
+                            "last_index": i + len(chunk),
+                            "processed_in_batch": len(all_results),
+                        },
+                        f,
                     )
-            df.to_parquet(output_parquet, index=False)
-            processed_store.flush()
 
-        except Exception as e:
-            logger.error(f"Failed checkpoint/save: {e}")
+                # Save data to Parquet (much smaller than JSON)
+                df = pd.DataFrame(all_results)
+                # Ensure complex types are handled
+                for col in df.columns:
+                    if df[col].apply(lambda x: isinstance(x, (dict, list))).any():
+                        df[col] = df[col].apply(
+                            lambda x: json.dumps(x) if isinstance(x, (dict, list)) else x
+                        )
+                df.to_parquet(output_parquet, index=False)
+                processed_store.flush()
+
+            except Exception as e:
+                logger.error(f"Failed checkpoint/save: {e}")
+        else:
+            # Skip Parquet rewriting to drastically improve speed when skipping processed items
+            try:
+                with open(checkpoint_path, "w", encoding="utf-8") as f:
+                    json.dump(
+                        {
+                            "last_index": i + len(chunk),
+                            "processed_in_batch": len(all_results),
+                        },
+                        f,
+                    )
+            except Exception as e:
+                logger.error(f"Failed checkpoint/save: {e}")
 
         elapsed = time.time() - start_time
         processed = i + len(chunk)
@@ -441,7 +457,12 @@ def main():
     try:
         batch_files = sorted(glob(os.path.join(SIRET_BATCHES_DIR, "siret_batch_*.txt")))
         # Start tracking from batch 33 onwards
-        batch_files = [f for f in batch_files if int(os.path.basename(f).replace('siret_batch_', '').replace('.txt', '')) >= 33]
+        batch_files = [
+            f
+            for f in batch_files
+            if int(os.path.basename(f).replace("siret_batch_", "").replace(".txt", ""))
+            >= 33
+        ]
 
         if not batch_files:
             logger.error(f"No batches found in {SIRET_BATCHES_DIR}")
@@ -465,7 +486,9 @@ def main():
                 continue
 
             try:
-                status = process_batch(batch_file, output_path, session, processed_store)
+                status = process_batch(
+                    batch_file, output_path, session, processed_store
+                )
                 if status == "TIMEOUT":
                     logger.info("Stopping run due to timeout.")
                     break

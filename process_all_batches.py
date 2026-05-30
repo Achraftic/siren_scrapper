@@ -410,7 +410,9 @@ def process_batch(batch_file, output_parquet, session, processed_store):
                 for col in df.columns:
                     if df[col].apply(lambda x: isinstance(x, (dict, list))).any():
                         df[col] = df[col].apply(
-                            lambda x: json.dumps(x) if isinstance(x, (dict, list)) else x
+                            lambda x: (
+                                json.dumps(x) if isinstance(x, (dict, list)) else x
+                            )
                         )
                 df.to_parquet(output_parquet, index=False)
                 processed_store.flush()

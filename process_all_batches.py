@@ -17,10 +17,10 @@ DATA_API_DIR = os.path.join(BASE_DIR, "data_api")
 SIRET_BATCHES_DIR = os.path.join(DATA_API_DIR, "siret_batches")
 # Load token from environment variables (Required for GitHub Actions Secrets)
 HUGGINGFACE_TOKEN = os.environ.get("HUGGINGFACE_TOKEN")
-MAX_WORKERS = 5
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", 5))
 MAX_BATCHES_PER_RUN = 5  # Increased, but limited by MAX_RUN_DURATION
 CHUNK_SIZE = 200  # Smaller chunks for more frequent checkpoints
-REQUEST_DELAY = 0.75  # Conservative delay to stay under 7 req/s (5 * 1/0.75 = 6.6 req/s)
+TARGET_REQ_PER_SEC = float(os.environ.get("TARGET_REQ_PER_SEC", 6.5))  # Configurable global rate limit
 API_URL = "https://recherche-entreprises.api.gouv.fr/search"
 USER_AGENT = "Mozilla/5.0 (DataMiningProject; contact@example.com)"
 PROCESSED_INDEX_DIR = os.path.join(DATA_API_DIR, "processed_index")
@@ -93,6 +93,26 @@ def upload_state():
 # Global state for rate limiting across threads
 cooldown_until = 0
 cooldown_lock = threading.Lock()
+
+class GlobalRateLimiter:
+    def __init__(self, rate):
+        self.interval = 1.0 / rate if rate > 0 else 0
+        self.last_call = 0
+        self.lock = threading.Lock()
+
+    def wait(self):
+        if self.interval <= 0:
+            return
+        with self.lock:
+            now = time.time()
+            elapsed = now - self.last_call
+            if elapsed < self.interval:
+                time.sleep(self.interval - elapsed)
+                self.last_call = time.time()
+            else:
+                self.last_call = now
+
+rate_limiter = GlobalRateLimiter(TARGET_REQ_PER_SEC)
 
 
 def normalize_identifier(raw_identifier):
@@ -214,7 +234,11 @@ def setup_session():
         connect=5,
         read=5,
     )
-    adapter = HTTPAdapter(max_retries=retry_strategy)
+    adapter = HTTPAdapter(
+        max_retries=retry_strategy,
+        pool_connections=MAX_WORKERS,
+        pool_maxsize=MAX_WORKERS
+    )
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     session.headers.update({"User-Agent": USER_AGENT})
@@ -234,6 +258,9 @@ def fetch_siret_data(session, siret):
         if current_time < cooldown_until:
             time.sleep(cooldown_until - current_time + 0.1)
             continue
+
+        # Respect requests per second limit
+        rate_limiter.wait()
 
         try:
             response = session.get(API_URL, params=params, timeout=30)
@@ -320,7 +347,6 @@ def process_batch(batch_file, output_parquet, session, processed_store):
 
     def worker(identifier):
         data = fetch_siret_data(session, identifier)
-        time.sleep(REQUEST_DELAY)
 
         if data and "results" in data and len(data["results"]) > 0:
             res = data["results"][0]
